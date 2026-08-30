@@ -209,7 +209,21 @@ driver /SUB/BIG.BIN : a2706a20394e48179a86c71e82c360c2960d3652340f9b9fdb355a42e3
 curl   /SUB/BIG.BIN : a2706a20394e48179a86c71e82c360c2960d3652340f9b9fdb355a42e3ac7691
 ```
 
-CI runs that on every push, and mounts the export with a real WebDAV client.
+CI runs that on every push against three clients nobody here wrote: `curl`,
+**cadaver**, and a **davfs2** kernel mount — plus the isolation attempts below
+and a `Content-Range` round trip.
+
+One honest caveat, because it was measured rather than assumed. Under the
+davfs2 mount, `ls` returns `EINVAL`. That is a davfs2 client bug, not a
+response this server gets wrong: with `debug most` its log shows
+`FUSE_READDIR` failing **without issuing any HTTP request**, moments after the
+same process parsed our `Depth: 1` PROPFIND (207, read in full) and logged
+`added /SUB/` and `added /HELLO.TXT`. The listing was sent, accepted and
+understood; davfs2 1.7.0 cannot hand it to the kernel on this FUSE version.
+Reads through that same mount return the driver's exact digest, and cadaver —
+the other neon-based client — lists both collections correctly. CI therefore
+asserts the mount, the lookup, the read and the digest, and reports the
+`readdir` quirk without failing on it.
 
 ## License
 
