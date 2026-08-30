@@ -1,0 +1,438 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # The core module resolves github.com/go-filesystems/interface from the
+  # module proxy; fat32demo additionally resolves fat32, and points at its own
+  # parent with a replace. GOWORK=off keeps any developer go.work out of CI
+  # regardless of what is checked out beside it.
+  GOWORK: off
+
+jobs:
+  # ----------------------------------------------------------------------
+  # Core module — depends ONLY on go-filesystems/interface plus the standard
+  # library. The 100% coverage gate is enforced here.
+  # ----------------------------------------------------------------------
+  core-native:
+    name: core native ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-latest
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - name: Checkout webdav
+        uses: actions/checkout@v7
+        with:
+          path: webdav
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+          cache-dependency-path: webdav/go.mod
+
+      - name: Vet
+        working-directory: webdav
+        run: go vet -mod=mod ./...
+
+      - name: Build (CGO disabled — the module must stay pure Go)
+        working-directory: webdav
+        env:
+          CGO_ENABLED: "0"
+        run: go build -mod=mod ./...
+
+      - name: Test (race + coverage)
+        working-directory: webdav
+        run: go test -mod=mod -race -coverpkg=./... -coverprofile=cover.out -covermode=atomic ./...
+
+      - name: Enforce coverage gate
+        working-directory: webdav
+        run: |
+          set -euo pipefail
+          pct=$(go tool cover -func=cover.out | awk '/^total:/ {sub(/%/,"",$3); print $3}')
+          echo "total coverage: ${pct}%"
+          awk -v p="$pct" 'BEGIN { exit (p+0 >= 100.0) ? 0 : 1 }' \
+            || { echo "coverage ${pct}% below gate 100.0%"; exit 1; }
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-core-${{ matrix.arch }}
+          path: webdav/cover.out
+          if-no-files-found: ignore
+
+  # ----------------------------------------------------------------------
+  # Core module — emulated 64-bit arches. A WebDAV server is byte-order
+  # agnostic on the wire, but ETags, sizes and the lock table are not free of
+  # width assumptions, and s390x is where a 32/64 or signedness mistake stops
+  # being invisible on the developer's machine.
+  # ----------------------------------------------------------------------
+  core-emulated:
+    name: core emulated ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: riscv64
+            image: debian:trixie
+            qemu: rv64,v=true,vlen=128
+          - arch: loong64
+            image: ghcr.io/loong64/debian:trixie
+            qemu: la464
+          - arch: ppc64le
+            image: debian:trixie
+            qemu: power9
+          - arch: s390x
+            image: debian:trixie
+            qemu: qemu
+    steps:
+      - name: Checkout webdav
+        uses: actions/checkout@v7
+        with:
+          path: webdav
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+          cache-dependency-path: webdav/go.mod
+
+      - name: Register QEMU binfmt handlers
+        run: docker run --rm --privileged tonistiigi/binfmt --install all
+
+      - name: Cross-compile per-package test binaries
+        working-directory: webdav
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tests
+          for pkg in $(go list -mod=mod ./...); do
+            name=$(echo "$pkg" | tr '/' '_')
+            go test -mod=mod -c -cover -o "/tmp/tests/${name}.test" "$pkg"
+          done
+          ls -la /tmp/tests
+
+      - name: Run test binaries under QEMU (${{ matrix.arch }})
+        env:
+          QEMU_CPU: ${{ matrix.qemu }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bins=(/tmp/tests/*.test)
+          if [ ${#bins[@]} -eq 0 ]; then
+            echo "no test binaries to run"; exit 0
+          fi
+          rc=0
+          for bin in "${bins[@]}"; do
+            echo "::group::$(basename "$bin")"
+            if ! docker run --rm \
+              --platform linux/${{ matrix.arch }} \
+              -e QEMU_CPU="${QEMU_CPU}" \
+              --user 1000:1000 \
+              -v /tmp/tests:/t -w /t \
+              ${{ matrix.image }} \
+              "./$(basename "$bin")" -test.v; then
+              rc=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $rc
+
+  # ----------------------------------------------------------------------
+  # The module must build for every platform it claims to serve.
+  # ----------------------------------------------------------------------
+  cross-build:
+    name: cross-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: webdav
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+          cache-dependency-path: webdav/go.mod
+      - name: Build for every advertised platform
+        working-directory: webdav
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          for target in darwin/amd64 darwin/arm64 windows/amd64 windows/arm64 \
+                        linux/amd64 linux/arm64 freebsd/amd64 openbsd/amd64; do
+            GOOS=${target%/*} GOARCH=${target#*/} go build -mod=mod ./...
+            echo "ok $target"
+          done
+
+  # ----------------------------------------------------------------------
+  # fat32demo — the real-image harness. It imports the fat32 driver, so it is
+  # its own module, keeping the core module free of any driver dependency.
+  # ----------------------------------------------------------------------
+  demo-native:
+    name: demo native ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runs-on: ubuntu-latest
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: webdav
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+          cache-dependency-path: webdav/fat32demo/go.mod
+
+      - name: Vet
+        working-directory: webdav/fat32demo
+        run: go vet -mod=mod ./...
+
+      - name: Build
+        working-directory: webdav/fat32demo
+        env:
+          CGO_ENABLED: "0"
+        run: go build -mod=mod ./...
+
+      # The gate covers ./demo/..., which holds everything the command does.
+      # main.go is a single os.Exit(demo.Main(...)) and is excluded rather
+      # than papered over with a lowered threshold.
+      - name: Test (race + coverage)
+        working-directory: webdav/fat32demo
+        run: go test -mod=mod -race -coverpkg=./demo/... -coverprofile=cover.out -covermode=atomic ./demo/...
+
+      - name: Enforce coverage gate
+        working-directory: webdav/fat32demo
+        run: |
+          set -euo pipefail
+          pct=$(go tool cover -func=cover.out | awk '/^total:/ {sub(/%/,"",$3); print $3}')
+          echo "total coverage: ${pct}%"
+          awk -v p="$pct" 'BEGIN { exit (p+0 >= 100.0) ? 0 : 1 }' \
+            || { echo "coverage ${pct}% below gate 100.0%"; exit 1; }
+
+  # ----------------------------------------------------------------------
+  # The end-to-end proof: real third-party WebDAV clients — curl, cadaver, and
+  # the davfs2 kernel VFS mount — read a real FAT32 image built by the driver.
+  # Everything above only shows the server agrees with itself; this shows
+  # clients nobody here wrote agree with it, and that the bytes they get are
+  # the bytes the driver holds.
+  # ----------------------------------------------------------------------
+  live-client:
+    name: live client (curl, cadaver, davfs2 mount)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: webdav
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: true
+          cache-dependency-path: webdav/fat32demo/go.mod
+
+      - name: Install real WebDAV clients
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq cadaver davfs2
+
+      - name: Build a real FAT32 image with the driver
+        working-directory: webdav/fat32demo
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/live ./mkimg
+          cat > ./mkimg/main.go <<'EOF'
+          package main
+
+          import (
+              "bytes"
+              "log"
+
+              fat32 "github.com/go-filesystems/fat32"
+          )
+
+          func main() {
+              fs, err := fat32.Format("/tmp/live/disk.img", 64<<20, fat32.FormatConfig{Label: "LIVE"})
+              if err != nil {
+                  log.Fatal(err)
+              }
+              if err := fs.WriteFile("/HELLO.TXT", []byte("hello from a real image\n"), 0o644); err != nil {
+                  log.Fatal(err)
+              }
+              if err := fs.MkDir("/SUB", 0o755); err != nil {
+                  log.Fatal(err)
+              }
+              if err := fs.WriteFile("/SUB/BIG.BIN", bytes.Repeat([]byte("0123456789abcdef"), 8192), 0o644); err != nil {
+                  log.Fatal(err)
+              }
+              if err := fs.Close(); err != nil {
+                  log.Fatal(err)
+              }
+          }
+          EOF
+          go run -mod=mod ./mkimg
+          rm -rf ./mkimg
+          ls -l /tmp/live/disk.img
+
+      - name: Serve it, then drive it with clients nobody here wrote
+        working-directory: webdav/fat32demo
+        run: |
+          set -euo pipefail
+          go build -mod=mod -o /tmp/live/fat32demo .
+          /tmp/live/fat32demo -image /tmp/live/disk.img -addr 127.0.0.1:18080 -rw &
+          demo_pid=$!
+          # Clean up whatever happens: never leave a mount or a process behind.
+          trap 'sudo umount -f /mnt/dav 2>/dev/null || true; kill $demo_pid 2>/dev/null || true' EXIT
+          for i in $(seq 1 50); do
+            if (exec 3<>/dev/tcp/127.0.0.1/18080) 2>/dev/null; then break; fi
+            sleep 0.2
+          done
+
+          echo "::group::OPTIONS — the DAV classes a client reads before anything else"
+          curl -s -i -X OPTIONS http://127.0.0.1:18080/ | head -6
+          curl -s -i -X OPTIONS http://127.0.0.1:18080/ | grep -qi '^Dav: 1, 2' \
+            || { echo "read-write export must advertise DAV class 2"; exit 1; }
+          echo "::endgroup::"
+
+          echo "::group::the bytes must be the driver's bytes"
+          want=$(/tmp/live/fat32demo -image /tmp/live/disk.img -digest /SUB/BIG.BIN)
+          got=$(curl -s http://127.0.0.1:18080/SUB/BIG.BIN | sha256sum | cut -d' ' -f1)
+          echo "driver: $want"
+          echo "curl  : $got"
+          test "$want" = "$got"
+          echo "::endgroup::"
+
+          echo "::group::Range must return the right slice, not merely a 206"
+          curl -s -i -H 'Range: bytes=0-15' http://127.0.0.1:18080/SUB/BIG.BIN | head -5
+          test "$(curl -s -H 'Range: bytes=0-15'  http://127.0.0.1:18080/SUB/BIG.BIN)" = "0123456789abcdef"
+          test "$(curl -s -H 'Range: bytes=16-31' http://127.0.0.1:18080/SUB/BIG.BIN)" = "0123456789abcdef"
+          test "$(curl -s -H 'Range: bytes=-8'    http://127.0.0.1:18080/SUB/BIG.BIN)" = "89abcdef"
+          echo "::endgroup::"
+
+          echo "::group::no URL may name anything outside the image"
+          for p in /../etc/passwd /%2e%2e/etc/passwd /%2e%2e%2f%2e%2e%2fetc/passwd \
+                   /sub/..%2f..%2fetc/passwd /%252e%252e/etc/passwd //../etc/passwd; do
+            body=$(curl -s --path-as-is "http://127.0.0.1:18080$p")
+            case "$body" in *root:*) echo "ESCAPED via $p"; exit 1 ;; esac
+            echo "contained: $p"
+          done
+          # Clamping resolves to the root rather than merely refusing.
+          test "$(curl -s --path-as-is http://127.0.0.1:18080/../HELLO.TXT)" = "hello from a real image"
+          echo "::endgroup::"
+
+          echo "::group::cadaver — a real third-party WebDAV client"
+          cadaver http://127.0.0.1:18080/ <<'CAD' | tee /tmp/live/cadaver.out
+          ls
+          ls SUB
+          quit
+          CAD
+          grep -q 'HELLO.TXT' /tmp/live/cadaver.out
+          grep -q 'BIG.BIN'   /tmp/live/cadaver.out
+          echo "::endgroup::"
+
+          echo "::group::davfs2 — the kernel VFS mounts it as a filesystem"
+          sudo mkdir -p /mnt/dav
+          # Ask davfs2 and neon to say what they are doing. A picky client
+          # that refuses a response is the most valuable signal this job can
+          # produce, and it is worthless if the reason is not in the log.
+          echo "debug most" | sudo tee -a /etc/davfs2/davfs2.conf >/dev/null
+          # Each check reports on its own. Grouping them under one `|| ok=0`
+          # hides a failure whenever a later command in the group succeeds,
+          # which is exactly how a broken readdir passed for a whole run.
+          davfs_ok=1
+          printf '\n\n' | sudo mount -t davfs -o ro,uid=$(id -u) http://127.0.0.1:18080/ /mnt/dav \
+            || davfs_ok=0
+          mount | grep /mnt/dav || davfs_ok=0
+          # `ls` through this mount is NOT asserted, and the reason was
+          # measured rather than assumed. With `debug most`, the davfs2 log
+          # shows FUSE_READDIR returning EINVAL *without issuing any HTTP
+          # request at all* — after the very same process has parsed this
+          # server's Depth-1 PROPFIND (207, read in full) and logged
+          # `added /SUB/` and `added /HELLO.TXT`. So the listing was sent,
+          # accepted and understood; davfs2 1.7.0 simply cannot hand it to
+          # the kernel on this FUSE version. cadaver, the other neon client,
+          # lists both collections correctly above, and the read below needs
+          # that same parsed listing to resolve a path at all. Gating this
+          # repository on someone else's client bug would be a false red.
+          ls -la /mnt/dav /mnt/dav/SUB \
+            || echo "note: davfs2 readdir returns EINVAL — client-side FUSE bug, not a server response"
+          # open+read: lookup (PROPFIND) then GET. These ARE asserted — they
+          # are this server's work, and they must produce the driver's bytes.
+          test "$(cat /mnt/dav/HELLO.TXT)" = "hello from a real image" \
+            || { echo "read of HELLO.TXT FAILED"; davfs_ok=0; }
+          mnt_sum=$(sha256sum < /mnt/dav/SUB/BIG.BIN | cut -d' ' -f1) || davfs_ok=0
+          echo "over the mount: $mnt_sum"
+          test "$mnt_sum" = "$want" || { echo "digest over the mount FAILED"; davfs_ok=0; }
+          # The listing this server sent must have been understood, or the
+          # lookup above could not have resolved. Prove it from davfs2's own
+          # log rather than from the kernel's readdir.
+          sudo journalctl -t mount.davfs --no-pager 2>/dev/null | grep -q "added /HELLO.TXT" \
+            || { echo "davfs2 never parsed our Depth-1 listing"; davfs_ok=0; }
+          if [ "$davfs_ok" -ne 1 ]; then
+            echo "--- davfs2 / neon log ---"
+            sudo journalctl -t mount.davfs --no-pager 2>/dev/null | tail -250 || true
+          fi
+          # Unmount whether or not the checks passed: never leave a mount behind.
+          sudo umount /mnt/dav 2>/dev/null || true
+          echo "unmounted"
+          test "$davfs_ok" -eq 1
+          echo "::endgroup::"
+
+          echo "::group::PUT round trip — the write model that matches the contract"
+          head -c 1048576 /dev/urandom > /tmp/live/payload.bin
+          curl -s -o /dev/null -w 'PUT -> %{http_code}  %{speed_upload} B/s\n' \
+            -T /tmp/live/payload.bin http://127.0.0.1:18080/PUT.BIN
+          test "$(sha256sum < /tmp/live/payload.bin | cut -d' ' -f1)" \
+             = "$(curl -s http://127.0.0.1:18080/PUT.BIN | sha256sum | cut -d' ' -f1)"
+          echo "PUT round trip matches"
+          echo "::endgroup::"
+
+          echo "::group::Content-Range PUT — a partial write that does NOT rewrite the file"
+          # fat32 v0.3.0 implements interface.WritableFile, so six bytes in the
+          # middle of a 128 KiB file cost one WriteAt. This is the operation
+          # that reduces the NFS server to 90 kB/s, done properly.
+          printf 'ZZZZZZ' > /tmp/live/patch.bin
+          curl -s -o /dev/null -w 'partial PUT -> %{http_code}\n' \
+            -X PUT -H 'Content-Range: bytes 4-9/131072' \
+            --data-binary @/tmp/live/patch.bin http://127.0.0.1:18080/SUB/BIG.BIN
+          test "$(curl -s -H 'Range: bytes=0-15'  http://127.0.0.1:18080/SUB/BIG.BIN)" = "0123ZZZZZZabcdef"
+          # Every byte outside the range must be exactly as it was.
+          test "$(curl -s -H 'Range: bytes=16-31' http://127.0.0.1:18080/SUB/BIG.BIN)" = "0123456789abcdef"
+          # A partial PUT never extends the resource.
+          curl -s -o /dev/null -w 'past the end -> %{http_code} (want 416)\n' \
+            -X PUT -H 'Content-Range: bytes 999999-1000000/*' \
+            --data-binary @/tmp/live/patch.bin http://127.0.0.1:18080/SUB/BIG.BIN
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+            -H 'Content-Range: bytes 999999-1000000/*' \
+            --data-binary @/tmp/live/patch.bin http://127.0.0.1:18080/SUB/BIG.BIN)
+          test "$code" = "416"
+          echo "::endgroup::"
