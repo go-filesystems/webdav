@@ -37,7 +37,12 @@ const (
 // The body is buffered in full before the driver sees it, because WriteFile
 // takes a []byte. That is bounded by [WithMaxBody] rather than left to the
 // client, since an unbounded read from a network peer is an unbounded
-// allocation here.
+// allocation here. Buffering also buys a property worth keeping: a body that
+// dies mid-upload writes nothing at all, where a streamed write would leave
+// half a file under the name the client believes it just uploaded.
+//
+// A PUT carrying a Content-Range is a partial update instead, handled by
+// [Handler.servePutRange] against the positional-write capability.
 func (h *Handler) servePut(w http.ResponseWriter, r *http.Request, name string) {
 	if name == "/" {
 		http.Error(w, "webdav: cannot PUT the root collection", http.StatusMethodNotAllowed)
@@ -45,6 +50,21 @@ func (h *Handler) servePut(w http.ResponseWriter, r *http.Request, name string) 
 	}
 	if err := h.checkLocks(r, name); err != nil {
 		writeLockError(w, err)
+		return
+	}
+	// A Content-Range turns PUT into a partial update — a different operation
+	// with different preconditions, patching an existing resource rather than
+	// replacing one — so it is dispatched before any of the whole-body
+	// machinery below runs. An unparseable one is refused rather than
+	// ignored: treating it as a plain PUT would overwrite the entire resource
+	// with what the client meant as a fragment of it.
+	if v := r.Header.Get("Content-Range"); v != "" {
+		cr, ok := parseContentRange(v)
+		if !ok {
+			http.Error(w, "webdav: malformed Content-Range", http.StatusBadRequest)
+			return
+		}
+		h.servePutRange(w, r, name, cr)
 		return
 	}
 	// RFC 4918 §9.7.1: PUT does not create intermediate collections, and a

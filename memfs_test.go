@@ -341,3 +341,105 @@ func (c *countingFS) ReadFile(path string) ([]byte, error) {
 	c.reads++
 	return c.memFS.ReadFile(path)
 }
+
+// --- the WritableFile capability -------------------------------------------
+
+// writeFS is an openFS whose Files also implement filesystem.WritableFile,
+// which is what a Content-Range PUT needs. fat32 v0.3.0 is the real driver
+// with this shape; this is the same shape with every failure made reachable,
+// because an error path that has never run has never been shown to close the
+// file it opened.
+type writeFS struct {
+	*openFS
+	// plain makes OpenFile return a File WITHOUT the write capability — the
+	// driver a partial PUT must be *refused* on rather than emulated with a
+	// read-splice-write.
+	plain    bool
+	writeErr error
+	syncErr  error
+	closeErr error
+	// synced counts Sync calls, which is how a test proves a 204 was not
+	// issued before the bytes were durable.
+	synced int
+}
+
+func (o *writeFS) OpenFile(path string) (filesystem.File, error) {
+	if o.openErr != nil {
+		return nil, o.openErr
+	}
+	if o.nilFile {
+		return nil, nil
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	n, err := o.node(path)
+	if err != nil {
+		return nil, err
+	}
+	if n.mode&0o170000 == 0o040000 {
+		return nil, errors.New("memfs: is a directory")
+	}
+	if o.plain {
+		return &memFile{fs: o.openFS, data: n.data, readErr: o.readErr}, nil
+	}
+	return &writeFile{fs: o, node: n}, nil
+}
+
+// writeFile is a File that can be written at an offset, like fat32's.
+type writeFile struct {
+	fs   *writeFS
+	node *memNode
+}
+
+func (f *writeFile) Size() int64 { return int64(len(f.node.data)) }
+
+func (f *writeFile) Close() error { return f.fs.closeErr }
+
+func (f *writeFile) ReadAt(p []byte, off int64) (int, error) {
+	if off >= int64(len(f.node.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.node.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+// WriteAt writes in place and never extends: interface.WritableFile allows a
+// driver that cannot grow to refuse with (0, err) rather than write short,
+// and refusing is the behaviour the handler has to cope with.
+func (f *writeFile) WriteAt(p []byte, off int64) (int, error) {
+	if f.fs.writeErr != nil {
+		return 0, f.fs.writeErr
+	}
+	if off+int64(len(p)) > int64(len(f.node.data)) {
+		return 0, errors.New("memfs: write past the end of the file")
+	}
+	copy(f.node.data[off:], p)
+	return len(p), nil
+}
+
+func (f *writeFile) Truncate(size int64) error {
+	if size < 0 {
+		return errors.New("memfs: negative size")
+	}
+	switch {
+	case size <= int64(len(f.node.data)):
+		f.node.data = f.node.data[:size]
+	default:
+		f.node.data = append(f.node.data, make([]byte, size-int64(len(f.node.data)))...)
+	}
+	return nil
+}
+
+func (f *writeFile) Sync() error {
+	f.fs.synced++
+	return f.fs.syncErr
+}
+
+// newWriteFS builds a writable-capable image with one file of known content.
+func newWriteFS(path, data string) *writeFS {
+	m := newMemFS().file(path, data)
+	return &writeFS{openFS: &openFS{memFS: m}}
+}

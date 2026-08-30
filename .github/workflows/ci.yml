@@ -72,7 +72,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: coverage-core-${{ matrix.arch }}
           path: webdav/cover.out
@@ -361,17 +361,31 @@ jobs:
 
           echo "::group::davfs2 — the kernel VFS mounts it as a filesystem"
           sudo mkdir -p /mnt/dav
-          # No credentials are configured, so the client must not be prompted
-          # for any; the blank answers keep it non-interactive if it asks.
-          printf '\n\n' | sudo mount -t davfs -o ro,uid=$(id -u) http://127.0.0.1:18080/ /mnt/dav
-          mount | grep /mnt/dav
-          ls -la /mnt/dav /mnt/dav/SUB
-          test "$(cat /mnt/dav/HELLO.TXT)" = "hello from a real image"
-          mnt_sum=$(sha256sum < /mnt/dav/SUB/BIG.BIN | cut -d' ' -f1)
-          echo "over the mount: $mnt_sum"
-          test "$mnt_sum" = "$want"
-          sudo umount /mnt/dav
-          echo "unmounted cleanly"
+          # Ask davfs2 and neon to say what they are doing. A picky client
+          # that refuses a response is the most valuable signal this job can
+          # produce, and it is worthless if the reason is not in the log.
+          echo "debug most" | sudo tee -a /etc/davfs2/davfs2.conf >/dev/null
+          davfs_ok=1
+          {
+            # No credentials are configured, so the client must not be
+            # prompted; the blank answers keep it non-interactive if it asks.
+            printf '\n\n' | sudo mount -t davfs -o ro,uid=$(id -u) http://127.0.0.1:18080/ /mnt/dav
+            mount | grep /mnt/dav
+            ls -la /mnt/dav /mnt/dav/SUB
+            test "$(cat /mnt/dav/HELLO.TXT)" = "hello from a real image"
+            mnt_sum=$(sha256sum < /mnt/dav/SUB/BIG.BIN | cut -d' ' -f1)
+            echo "over the mount: $mnt_sum"
+            test "$mnt_sum" = "$want"
+          } || davfs_ok=0
+          if [ "$davfs_ok" -ne 1 ]; then
+            echo "--- davfs2 / neon log ---"
+            sudo journalctl -t mount.davfs --no-pager 2>/dev/null | tail -150 || true
+            sudo cat /var/log/syslog 2>/dev/null | grep -i davfs | tail -150 || true
+          fi
+          # Unmount whether or not the checks passed: never leave a mount behind.
+          sudo umount /mnt/dav 2>/dev/null || true
+          echo "unmounted"
+          test "$davfs_ok" -eq 1
           echo "::endgroup::"
 
           echo "::group::PUT round trip — the write model that matches the contract"
@@ -381,4 +395,25 @@ jobs:
           test "$(sha256sum < /tmp/live/payload.bin | cut -d' ' -f1)" \
              = "$(curl -s http://127.0.0.1:18080/PUT.BIN | sha256sum | cut -d' ' -f1)"
           echo "PUT round trip matches"
+          echo "::endgroup::"
+
+          echo "::group::Content-Range PUT — a partial write that does NOT rewrite the file"
+          # fat32 v0.3.0 implements interface.WritableFile, so six bytes in the
+          # middle of a 128 KiB file cost one WriteAt. This is the operation
+          # that reduces the NFS server to 90 kB/s, done properly.
+          printf 'ZZZZZZ' > /tmp/live/patch.bin
+          curl -s -o /dev/null -w 'partial PUT -> %{http_code}\n' \
+            -X PUT -H 'Content-Range: bytes 4-9/131072' \
+            --data-binary @/tmp/live/patch.bin http://127.0.0.1:18080/SUB/BIG.BIN
+          test "$(curl -s -H 'Range: bytes=0-15'  http://127.0.0.1:18080/SUB/BIG.BIN)" = "0123ZZZZZZabcdef"
+          # Every byte outside the range must be exactly as it was.
+          test "$(curl -s -H 'Range: bytes=16-31' http://127.0.0.1:18080/SUB/BIG.BIN)" = "0123456789abcdef"
+          # A partial PUT never extends the resource.
+          curl -s -o /dev/null -w 'past the end -> %{http_code} (want 416)\n' \
+            -X PUT -H 'Content-Range: bytes 999999-1000000/*' \
+            --data-binary @/tmp/live/patch.bin http://127.0.0.1:18080/SUB/BIG.BIN
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+            -H 'Content-Range: bytes 999999-1000000/*' \
+            --data-binary @/tmp/live/patch.bin http://127.0.0.1:18080/SUB/BIG.BIN)
+          test "$code" = "416"
           echo "::endgroup::"

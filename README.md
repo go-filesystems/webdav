@@ -102,6 +102,27 @@ Read-only exports advertise `DAV: 1` and an `Allow` without the write verbs;
 `ReadWrite()` exports advertise `DAV: 1, 2` — class 2 being the lock support
 the macOS client insists on before it will write.
 
+### Partial writes
+
+A `PUT` carrying a `Content-Range` replaces a byte interval in place, through
+the optional
+[`filesystem.WritableFile`](https://pkg.go.dev/github.com/go-filesystems/interface#WritableFile)
+capability that `interface` v0.3.0 added and `fat32` v0.3.0 implements:
+
+```sh
+printf 'ZZZZZZ' | curl -X PUT -H 'Content-Range: bytes 4-9/131072' \
+    --data-binary @- http://127.0.0.1:8080/SUB/BIG.BIN
+```
+
+Six bytes changed in a 128 KiB file cost one `WriteAt`. This is precisely the
+operation that reduces the NFS server to 90 kB/s — without a positional write,
+patching sixteen bytes of a 4 GiB file means reading, splicing and writing
+back 8 GiB — so a driver that lacks the capability is answered **501 Not
+Implemented** rather than served the slow way. Quietly falling back would hand
+a client that asked for the cheap operation the most expensive one the module
+has, and hide it behind a `204`. A partial `PUT` never extends a resource: a
+range past the end is **416**, like an unsatisfiable `GET`.
+
 `Range` is served through the optional
 [`filesystem.Opener`](https://pkg.go.dev/github.com/go-filesystems/interface#Opener)
 capability, so a byte range costs a `ReadAt` and not a whole-file read. A

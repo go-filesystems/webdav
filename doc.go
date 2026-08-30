@@ -25,7 +25,11 @@
 //     and write it back — O(filesize) per request, measured at 90 kB/s over a
 //     real mount. WebDAV PUT sends the whole body and is therefore exactly
 //     [github.com/go-filesystems/interface.Filesystem.WriteFile]: one write
-//     of one file, at the driver's own speed.
+//     of one file, at the driver's own speed. And where a client does want a
+//     partial write, a PUT carrying a Content-Range is served through
+//     [github.com/go-filesystems/interface.WritableFile] — one WriteAt, not a
+//     read-splice-write — or refused 501 if the driver has no positional
+//     write, rather than emulated at the cost the client was trying to avoid.
 //   - A client every machine already has. A GET on a file returns its bytes,
 //     so a browser, `curl`, `wget` and every HTTP library are clients without
 //     mounting anything.

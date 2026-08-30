@@ -205,8 +205,6 @@ func prop(name string, inner []byte) property {
 // one, and a client that reads the response with a strict parser configured
 // for a specific encoding needs it.
 func writeMultistatus(w http.ResponseWriter, ms multistatus) {
-	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-	w.WriteHeader(StatusMulti)
 	var b bytes.Buffer
 	b.WriteString(xml.Header)
 	enc := xml.NewEncoder(&b)
@@ -219,6 +217,16 @@ func writeMultistatus(w http.ResponseWriter, ms multistatus) {
 	// request could ever execute, which is worse than saying so here.
 	_ = enc.Encode(ms)
 	_ = enc.Flush()
+	// The body is fully built before the header goes out so that its length
+	// can be declared. This is not cosmetic. Calling WriteHeader first leaves
+	// net/http no choice but chunked transfer-encoding, and a 207 is exactly
+	// the response the pickiest WebDAV clients refuse to read that way — the
+	// macOS NetFS client and neon-based ones (davfs2, cadaver) want to size
+	// the XML document before parsing it. Declaring the length costs nothing
+	// here, because the buffer already exists.
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(b.Len()))
+	w.WriteHeader(StatusMulti)
 	// A short write means the client went away mid-body, which is not this
 	// server's problem to report to anyone: the status line is already gone.
 	_, _ = w.Write(b.Bytes())
