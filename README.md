@@ -34,11 +34,18 @@ same machine (16 MiB payload, fresh image per run):
 
 | | throughput |
 |---|---|
-| `fat32.WriteFile`, no HTTP at all — the driver's own ceiling | **6.8 MB/s** |
-| `PUT` over this server | **6.4 MB/s** (~95% of the ceiling) |
+| `fat32.WriteFile`, no HTTP at all — the driver's own ceiling | **6.6 MB/s** |
+| `PUT` over this server | **6.6 MB/s** |
 | `WRITE` over `go-filesystems/nfs` | 90 kB/s |
 
-The transport is not the bottleneck; the driver is. That is the whole point.
+Median of five alternating runs, 16 MiB into a freshly formatted 64 MiB image
+each time, every binary built before the timed region. The two columns are
+indistinguishable: **`PUT` costs the driver's own write and nothing measurable
+on top**, which is about **70×** what the NFS server manages against the same
+driver. The transport is not the bottleneck; the driver is. That is the whole
+point — and it is a property of the *shape* of the operation, not of tuning.
+On a Linux CI runner the same `PUT` measures ~30 MB/s, so treat the ratio, not
+the absolute number, as the result.
 
 **3. A client every machine already has.** `GET` on a file returns its bytes,
 so a browser, `curl`, `wget` and every HTTP library are clients without
