@@ -40,7 +40,7 @@ jobs:
           path: webdav
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: stable
           check-latest: true
@@ -110,7 +110,7 @@ jobs:
           path: webdav
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: stable
           check-latest: true
@@ -171,7 +171,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: webdav
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           check-latest: true
@@ -208,7 +208,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: webdav
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           check-latest: true
@@ -255,7 +255,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: webdav
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
           check-latest: true
