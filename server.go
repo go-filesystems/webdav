@@ -86,6 +86,9 @@ type Handler struct {
 	// total and avail feed the RFC 4331 quota properties. Zero means
 	// "unknown"; see [WithCapacity].
 	total, avail uint64
+	// capacity, when set, is asked instead at every PROPFIND that reports
+	// them; see [WithCapacityFunc].
+	capacity func() (total, avail uint64)
 
 	// fsmu serialises *all* access to the exported filesystem.
 	//
@@ -143,7 +146,32 @@ func WithPrefix(prefix string) Option {
 // clients read as "unknown", and the caller who does know (it opened the
 // image, so it knows its size) can say so.
 func WithCapacity(total, avail uint64) Option {
-	return func(h *Handler) error { h.total, h.avail = total, avail; return nil }
+	return func(h *Handler) error { h.total, h.avail, h.capacity = total, avail, nil; return nil }
+}
+
+// WithCapacityFunc makes the RFC 4331 quota properties ask f for the total
+// and available byte counts each time they are reported, instead of the fixed
+// ones [WithCapacity] sets. It is for a tree whose size or free space changes
+// while it is served -- a directory of the host, a quota that is resized --
+// where a number taken once at New goes stale with the first write.
+//
+// f runs on the request's goroutine, outside the handler's lock, once per
+// collection a PROPFIND reports: it must be safe for concurrent use and
+// cheap, because a client's free-space display waits for it. A caller whose
+// numbers are slow to obtain keeps the last ones it has and refreshes them
+// elsewhere. Zero total means "unknown", as for [WithCapacity]. Of the two
+// options, the one given last wins; a nil f is the same as never giving
+// this one.
+func WithCapacityFunc(f func() (total, avail uint64)) Option {
+	return func(h *Handler) error { h.capacity = f; return nil }
+}
+
+// space is the total and available byte counts to report now.
+func (h *Handler) space() (total, avail uint64) {
+	if h.capacity != nil {
+		return h.capacity()
+	}
+	return h.total, h.avail
 }
 
 // WithMaxBody bounds the number of bytes a PUT may carry. See

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-filesystems/webdav"
@@ -118,6 +119,46 @@ func TestPropfindQuotaPropertiesOnlyWhenCapacityIsKnown(t *testing.T) {
 		c.do("PROPFIND", "/", propfindAll, "Depth", "0").
 			wantContains(t, "<quota-available-bytes xmlns=\"DAV:\">400</quota-available-bytes>", "available").
 			wantContains(t, "<quota-used-bytes xmlns=\"DAV:\">600</quota-used-bytes>", "used")
+	})
+	t.Run("asked at every PROPFIND", func(t *testing.T) {
+		var avail atomic.Uint64
+		avail.Store(700)
+		c, _ := serve(t, newMemFS(), webdav.WithCapacity(1, 1),
+			webdav.WithCapacityFunc(func() (uint64, uint64) { return 1000, avail.Load() }))
+		c.do("PROPFIND", "/", propfindAll, "Depth", "0").
+			wantContains(t, "<quota-available-bytes xmlns=\"DAV:\">700</quota-available-bytes>", "available").
+			wantContains(t, "<quota-used-bytes xmlns=\"DAV:\">300</quota-used-bytes>", "used")
+		avail.Store(250)
+		c.do("PROPFIND", "/", propfindAll, "Depth", "0").
+			wantContains(t, "<quota-available-bytes xmlns=\"DAV:\">250</quota-available-bytes>", "available after a write").
+			wantContains(t, "<quota-used-bytes xmlns=\"DAV:\">750</quota-used-bytes>", "used after a write")
+		// Named, not allprop: the other path to the same values.
+		named := `<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop>` +
+			`<D:quota-used-bytes/></D:prop></D:propfind>`
+		c.do("PROPFIND", "/", named, "Depth", "0").
+			wantContains(t, "<quota-used-bytes xmlns=\"DAV:\">750</quota-used-bytes>", "named used")
+		// More available than the total is nothing used, not 2^64-something.
+		avail.Store(5000)
+		c.do("PROPFIND", "/", propfindAll, "Depth", "0").
+			wantContains(t, "<quota-used-bytes xmlns=\"DAV:\">0</quota-used-bytes>", "used, clamped")
+	})
+	t.Run("the option given last wins", func(t *testing.T) {
+		f := func() (uint64, uint64) { return 1000, 1 }
+		c, _ := serve(t, newMemFS(), webdav.WithCapacityFunc(f), webdav.WithCapacity(1000, 400))
+		c.do("PROPFIND", "/", propfindAll, "Depth", "0").
+			wantContains(t, "<quota-available-bytes xmlns=\"DAV:\">400</quota-available-bytes>", "fixed after func")
+		c, _ = serve(t, newMemFS(), webdav.WithCapacity(1000, 400), webdav.WithCapacityFunc(nil))
+		c.do("PROPFIND", "/", propfindAll, "Depth", "0").
+			wantContains(t, "<quota-available-bytes xmlns=\"DAV:\">400</quota-available-bytes>", "nil func")
+	})
+	t.Run("a func that says unknown", func(t *testing.T) {
+		c, _ := serve(t, newMemFS(), webdav.WithCapacityFunc(func() (uint64, uint64) { return 0, 0 }))
+		c.do("PROPFIND", "/", propfindAll, "Depth", "0").
+			wantLacks(t, "quota-available-bytes", "quota must be absent when the func says unknown")
+		named := `<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop>` +
+			`<D:quota-available-bytes/></D:prop></D:propfind>`
+		c.do("PROPFIND", "/", named, "Depth", "0").
+			wantContains(t, "404", "a named quota property that is unknown is not found")
 	})
 	t.Run("not on a file", func(t *testing.T) {
 		c, _ := serve(t, newMemFS().file("/a.txt", "x"), webdav.WithCapacity(1000, 400))
