@@ -77,6 +77,13 @@ if err != nil {
 log.Fatal(http.ListenAndServe("127.0.0.1:8080", h))
 ```
 
+The filesystem interface has no `statfs`, so a handler omits the RFC 4331
+quota properties (clients read that as "unknown") unless the caller says
+otherwise. `webdav.WithCapacity(total, avail)` sets fixed numbers.
+`webdav.WithCapacityFunc(f)` asks `f` each time the properties are reported,
+for a tree whose free space or quota changes while it is served. `f` must be
+safe for concurrent use and cheap.
+
 Then, with no mount at all:
 
 ```sh
