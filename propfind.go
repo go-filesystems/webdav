@@ -244,8 +244,10 @@ func (h *Handler) propNames(info resourceInfo) []string {
 		// a collection: there is no body to have a length.
 		names = append(names, "getcontentlength")
 	}
-	if info.isDir && h.total > 0 {
-		names = append(names, "quota-available-bytes", "quota-used-bytes")
+	if info.isDir {
+		if total, _ := h.space(); total > 0 {
+			names = append(names, "quota-available-bytes", "quota-used-bytes")
+		}
 	}
 	return names
 }
@@ -321,16 +323,21 @@ func (h *Handler) propValue(info resourceInfo, n xml.Name) (property, bool) {
 		return prop("getcontentlength", textValue(strconv.FormatUint(info.size, 10))), true
 	case "getcontenttype":
 		return prop("getcontenttype", textValue(contentTypeOf(info))), true
-	case "quota-available-bytes":
-		if !info.isDir || h.total == 0 {
+	case "quota-available-bytes", "quota-used-bytes":
+		if !info.isDir {
 			return property{}, false
 		}
-		return prop("quota-available-bytes", textValue(strconv.FormatUint(h.avail, 10))), true
-	case "quota-used-bytes":
-		if !info.isDir || h.total == 0 {
+		total, avail := h.space()
+		if total == 0 {
 			return property{}, false
 		}
-		return prop("quota-used-bytes", textValue(strconv.FormatUint(h.total-h.avail, 10))), true
+		if n.Local == "quota-available-bytes" {
+			return prop(n.Local, textValue(strconv.FormatUint(avail, 10))), true
+		}
+		// More available than the total -- a pool with room past a quota
+		// that was just shrunk, numbers read a moment apart -- is nothing
+		// used, not a used count wrapped round to 2^64.
+		return prop(n.Local, textValue(strconv.FormatUint(total-min(avail, total), 10))), true
 	default:
 		return property{}, false
 	}
