@@ -86,6 +86,16 @@ func (h *Handler) open(info resourceInfo) (io.ReadSeeker, func(), error) {
 			// turn into a nil dereference in a request goroutine.
 			return nil, nil, errNilFile
 		}
+		if hf, ok := f.(filesystem.HostFile); ok {
+			// A file of the host, opened for this request alone: handed to
+			// ServeContent as it is, so that net/http gives it to the
+			// connection's ReadFrom and *net.TCPConn sends it with
+			// sendfile(2), without a copy through this process. Over TLS
+			// there is no such ReadFrom and net/http copies, as before. No
+			// driver lock: the reads are the host descriptor's, which
+			// touch nothing the lock protects.
+			return hf, func() { _ = f.Close() }, nil
+		}
 		return io.NewSectionReader(&lockedReaderAt{h: h, f: f}, 0, f.Size()), func() { _ = f.Close() }, nil
 	}
 	data, err := h.fs.ReadFile(info.path)
