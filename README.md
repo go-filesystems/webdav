@@ -116,6 +116,22 @@ Read-only exports advertise `DAV: 1` and an `Allow` without the write verbs;
 `ReadWrite()` exports advertise `DAV: 1, 2` — class 2 being the lock support
 the macOS client insists on before it will write.
 
+### Sending a file without copying it
+
+When the driver's `File` is a
+[`filesystem.HostFile`](https://pkg.go.dev/github.com/go-filesystems/interface#HostFile)
+-- a file of the host, as [`osfs`](https://github.com/go-filesystems/osfs)
+opens -- a GET hands it to `http.ServeContent` as it is. net/http copies the
+first 512 bytes to sniff a type and gives the rest to the connection's
+`ReadFrom`, which on a plain `*net.TCPConn` is `sendfile(2)`: the kernel
+sends the file, and this process does not copy it (since v0.4.0). Ranges
+too. Over TLS there is no such `ReadFrom` -- Go has no kernel TLS -- and the
+body is copied as before. A server that wraps the `net.Conn` must pass
+`ReadFrom` on, or net/http only sees a connection to copy into.
+`TestAHostFileIsSentWithoutACopy` counts the bytes read through the
+process: at most 512 with this, all of them without. Measured through
+go-fileshare/fileshare: about ×2.4.
+
 ### Partial writes
 
 A `PUT` carrying a `Content-Range` replaces a byte interval in place, through
