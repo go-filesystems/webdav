@@ -1,8 +1,12 @@
 github.com/go-filesystems/fat32 v0.5.0 h1:/BfabQ3IejcIQljlUWwSlqeGIwxRPI2o1lb+p4yHpOg=
 github.com/go-filesystems/fat32 v0.5.0/go.mod h1:87Sm1Nx+BUVPfjyFwwQ4dr11r5+kbeG9Umc7XlKDJiE=
-github.com/go-filesystems/interface v0.4.0 h1:JAekS0P8ocsFy8knnIZvkKJiifgRw3RKACkL3MQmBd4=
-github.com/go-filesystems/interface v0.4.0/go.mod h1:u9v8mvapNV8djzObwCECdyd2g6JBU6HNTR4EAqxOn6U=
+github.com/go-filesystems/hostcopy v0.1.0 h1:eNOy7iGrEe7dGZQ+UhnXJraZsnT+Ht3pP3OIWy69Wq0=
+github.com/go-filesystems/hostcopy v0.1.0/go.mod h1:5HPox1vd9HgHm4tzbem2w3a/QxmM0gyxhFQmKBKMrKI=
+github.com/go-filesystems/interface v0.5.0 h1:AsbSXYG5cp497Ki0Ez88s8wwrVEmeRmFLd40T4d3UwA=
+github.com/go-filesystems/interface v0.5.0/go.mod h1:u9v8mvapNV8djzObwCECdyd2g6JBU6HNTR4EAqxOn6U=
 github.com/go-volumes/gpt v0.2.0 h1:9qLfeS9pcyXbowgRJr0mf07u0IX9XzqYQW1UHK2X/qo=
 github.com/go-volumes/gpt v0.2.0/go.mod h1:eBAzPkLd8zHkg3WiYGk70M4g6PYY8S5K4JP+kEMs0mw=
 github.com/go-volumes/safeio v0.0.0-20260831125406-d8f54b2890d4 h1:RKO58FmZvbvKh6wf+7Y8gohGJ0/2hq4N8L+x2kT9bak=
 github.com/go-volumes/safeio v0.0.0-20260831125406-d8f54b2890d4/go.mod h1:QQdGwEUmPSdzD+OPq+ZcKso9ljssqgBXNk0/9z7moho=
+golang.org/x/sys v0.48.0 h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=
+golang.org/x/sys v0.48.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
