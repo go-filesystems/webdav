@@ -132,6 +132,17 @@ body is copied as before. A server that wraps the `net.Conn` must pass
 process: at most 512 with this, all of them without. Measured through
 go-fileshare/fileshare: about ×2.4.
 
+### COPY without holding the file
+
+A `COPY` of a file goes from the opened source into the opened destination
+through [`hostcopy`](https://github.com/go-filesystems/hostcopy) (since
+v0.5.0): a megabyte at a time, or, between two files of the host, by
+`copy_file_range(2)` in the kernel, which shares the blocks where the
+filesystem can (a reflink on btrfs and XFS). Before, a `COPY` read the whole
+source into memory and wrote it back, so one request cost the server the size
+of any file a writer could name. A driver that cannot open files, or cannot
+write them in place, is still copied the whole-file way.
+
 ### Partial writes
 
 A `PUT` carrying a `Content-Range` replaces a byte interval in place, through

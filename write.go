@@ -2,11 +2,15 @@ package webdav
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/go-filesystems/hostcopy"
+	filesystem "github.com/go-filesystems/interface"
 )
 
 // errNilFile reports a driver whose OpenFile returned (nil, nil).
@@ -445,11 +449,7 @@ func (h *Handler) serveCopy(w http.ResponseWriter, r *http.Request, name string)
 // hold [Handler.fsmu].
 func (h *Handler) copyTree(src resourceInfo, dst string, deep bool, failures *[]response) {
 	if !src.isDir {
-		data, err := h.fs.ReadFile(src.path)
-		if err == nil {
-			err = h.fs.WriteFile(dst, data, defaultFilePerm)
-		}
-		if err != nil {
+		if err := h.copyFile(src.path, dst); err != nil {
 			*failures = append(*failures, response{
 				Href:   h.href(dst, false),
 				Status: statusText(statusFor(err, http.StatusInternalServerError)),
@@ -492,4 +492,72 @@ func (h *Handler) copyTree(src resourceInfo, dst string, deep bool, failures *[]
 		}
 		h.copyTree(child, join(dst, n), true, failures)
 	}
+}
+
+// copyFile copies one file for COPY.
+//
+// When the driver opens files, the copy goes through hostcopy.Range: from
+// one opened file into the other, a megabyte at a time -- or, between two
+// files of the host, by copy_file_range(2) in the kernel, which shares the
+// blocks where the filesystem can (a reflink on btrfs and XFS). Before, a
+// COPY read the whole source into memory and wrote it back, so one request
+// cost this process the size of any file a writer could name.
+//
+// The caller holds [Handler.fsmu].
+func (h *Handler) copyFile(src, dst string) error {
+	if h.opener == nil {
+		data, err := h.fs.ReadFile(src)
+		if err != nil {
+			return err
+		}
+		return h.fs.WriteFile(dst, data, defaultFilePerm)
+	}
+	sf, err := h.opener.OpenFile(src)
+	if err != nil {
+		return err
+	}
+	if sf == nil {
+		return errNilFile
+	}
+	defer sf.Close()
+	// The destination is created empty, then opened for writing.
+	if err := h.fs.WriteFile(dst, nil, defaultFilePerm); err != nil {
+		return err
+	}
+	df, err := h.opener.OpenFile(dst)
+	if err != nil {
+		return err
+	}
+	if df == nil {
+		return errNilFile
+	}
+	wf, ok := df.(filesystem.WritableFile)
+	if !ok {
+		// A driver that opens files but cannot write them in place: the
+		// whole-file way, as before.
+		_ = df.Close()
+		data, err := h.fs.ReadFile(src)
+		if err != nil {
+			return err
+		}
+		return h.fs.WriteFile(dst, data, defaultFilePerm)
+	}
+	size := sf.Size()
+	// Its final length first: a driver whose WriteAt cannot extend a file
+	// (fat32's) grows it only through Truncate, sparsely where it can.
+	err = wf.Truncate(size)
+	if err == nil {
+		var n int64
+		n, err = hostcopy.Range(wf, sf, 0, 0, size)
+		if err == nil && n != size {
+			err = fmt.Errorf("copied %d of %d bytes", n, size)
+		}
+	}
+	if err == nil {
+		err = wf.Sync()
+	}
+	if cerr := wf.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
