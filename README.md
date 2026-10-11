@@ -161,8 +161,27 @@ patching sixteen bytes of a 4 GiB file means reading, splicing and writing
 back 8 GiB — so a driver that lacks the capability is answered **501 Not
 Implemented** rather than served the slow way. Quietly falling back would hand
 a client that asked for the cheap operation the most expensive one the module
-has, and hide it behind a `204`. A partial `PUT` never extends a resource: a
-range past the end is **416**, like an unsatisfiable `GET`.
+has, and hide it behind a `204`.
+
+**A range that starts exactly at the end appends** (since v0.6.0). That is how
+a large file goes in pieces, without one request holding the whole file in
+memory, here or in a browser that cannot stream a request body. Create the file
+with an empty `PUT`, then send each piece where the last one ended:
+
+```sh
+curl -X PUT --data-binary '' http://127.0.0.1:8080/SUB/BIG.PART
+curl -X PUT -H 'Content-Range: bytes 0-8388607/20000000' --data-binary @piece0 http://127.0.0.1:8080/SUB/BIG.PART
+curl -X PUT -H 'Content-Range: bytes 8388608-16777215/20000000' --data-binary @piece1 http://127.0.0.1:8080/SUB/BIG.PART
+# ... then MOVE BIG.PART to its name, so nobody sees half a file under it
+```
+
+- The file is grown with `Truncate` before the write, because a driver whose
+  `WriteAt` cannot extend (fat32's) grows only that way.
+- If the write then fails, the file is **shrunk back**, so it does not end in
+  zeros the client never sent.
+- A range that starts **past** the end would leave a hole of bytes nobody
+  sent, and stays **416**, like an unsatisfiable `GET`.
+- A piece sent twice rewrites bytes already there, in place.
 
 `Range` is served through the optional
 [`filesystem.Opener`](https://pkg.go.dev/github.com/go-filesystems/interface#Opener)

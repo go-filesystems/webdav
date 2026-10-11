@@ -152,7 +152,14 @@ func (h *Handler) servePutRange(w http.ResponseWriter, r *http.Request, name str
 	size := f.Size()
 	h.fsmu.Unlock()
 
-	if cr.end >= size {
+	// ⭐ A RANGE THAT STARTS EXACTLY AT THE END APPENDS. It is how a large
+	// upload goes in pieces -- a plain PUT of nothing, then each piece where
+	// the last one ended -- without one request holding the whole file in
+	// memory here, or in a browser that cannot stream a request body. Only
+	// there: a range that starts past the end would leave a hole whose bytes
+	// nobody sent, and that stays refused.
+	appending := cr.start == size
+	if cr.end >= size && !appending {
 		// Mirrors the GET Range refusal, including the Content-Range that
 		// tells the client what the size actually is.
 		w.Header().Set("Content-Range", "bytes */"+strconv.FormatInt(size, 10))
@@ -186,7 +193,19 @@ func (h *Handler) servePutRange(w http.ResponseWriter, r *http.Request, name str
 	}
 
 	h.fsmu.Lock()
-	_, err = f.WriteAt(body, cr.start)
+	if appending {
+		// Grown first, then written: a driver whose WriteAt cannot extend a
+		// file (fat32's) grows it only through Truncate.
+		err = f.Truncate(cr.end + 1)
+	}
+	if err == nil {
+		_, err = f.WriteAt(body, cr.start)
+		if err != nil && appending {
+			// Grown and then not written: shrink it back, or the file ends in
+			// zeros the client never sent and believes it did not send.
+			_ = f.Truncate(size)
+		}
+	}
 	if err == nil {
 		// Sync before reporting success: a 204 that a power cut can retract
 		// is a lie, and this is the one call that makes it true.

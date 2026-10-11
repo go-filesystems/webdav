@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -293,5 +294,67 @@ func TestContentRangePutIsRefusedOnAReadOnlyExport(t *testing.T) {
 		wantCode(t, http.StatusForbidden, "partial PUT on a read-only export")
 	if string(fs.nodes["/f.bin"].data) != "0123456789" {
 		t.Fatal("a read-only export was written through a Content-Range PUT")
+	}
+}
+
+// TestContentRangePutAtTheEndAppends: a range starting exactly where the file
+// ends grows it -- on a driver whose WriteAt cannot extend (this fake's, like
+// fat32's), so the growth has to go through Truncate first.
+func TestContentRangePutAtTheEndAppends(t *testing.T) {
+	fs := newWriteFS("/f.bin", "0123456789")
+	c, _ := serve(t, fs, webdav.ReadWrite())
+	c.do("PUT", "/f.bin", "AB", "Content-Range", "bytes 10-11/12").
+		wantCode(t, http.StatusNoContent, "append")
+	if got := string(fs.nodes["/f.bin"].data); got != "0123456789AB" {
+		t.Fatalf("after an append the file is %q", got)
+	}
+	// A range that starts past the end would leave bytes nobody sent: refused,
+	// and the file untouched.
+	c.do("PUT", "/f.bin", "Z", "Content-Range", "bytes 13-13/*").
+		wantCode(t, http.StatusRequestedRangeNotSatisfiable, "a gap")
+	if got := string(fs.nodes["/f.bin"].data); got != "0123456789AB" {
+		t.Fatalf("a refused gap changed the file to %q", got)
+	}
+}
+
+// TestAnUploadInPieces is what the append is for: a large file goes in as an
+// empty PUT and then piece after piece, none of them the whole file.
+func TestAnUploadInPieces(t *testing.T) {
+	fs := newWriteFS("/f.bin", "")
+	c, _ := serve(t, fs, webdav.ReadWrite())
+	c.do("PUT", "/big.part", "").wantCode(t, http.StatusCreated, "create empty")
+	want := ""
+	for i, piece := range []string{"aaaa", "bbbb", "cc"} {
+		start := len(want)
+		end := start + len(piece) - 1
+		c.do("PUT", "/big.part", piece, "Content-Range", "bytes "+itoa(start)+"-"+itoa(end)+"/10").
+			wantCode(t, http.StatusNoContent, "piece "+itoa(i))
+		want += piece
+	}
+	if got := string(fs.nodes["/big.part"].data); got != want {
+		t.Fatalf("assembled %q, want %q", got, want)
+	}
+	// A piece sent twice is not an append any more: it is a rewrite of bytes
+	// already there, in place, and the file keeps its size.
+	c.do("PUT", "/big.part", "cc", "Content-Range", "bytes 8-9/10").wantCode(t, http.StatusNoContent, "resent")
+	if got := string(fs.nodes["/big.part"].data); got != want {
+		t.Fatalf("a resent last piece changed the file to %q", got)
+	}
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
+
+// TestAFailedAppendLeavesTheFileAsItWas: grown by Truncate, then the write
+// fails -- the file goes back to its size, not to its size plus zeros.
+func TestAFailedAppendLeavesTheFileAsItWas(t *testing.T) {
+	fs := newWriteFS("/f.bin", "0123456789")
+	fs.writeErr = errors.New("disk on fire")
+	c, _ := serve(t, fs, webdav.ReadWrite())
+	r := c.do("PUT", "/f.bin", "AB", "Content-Range", "bytes 10-11/12")
+	if r.code < 500 {
+		t.Fatalf("a failed append answered %d", r.code)
+	}
+	if got := string(fs.nodes["/f.bin"].data); got != "0123456789" {
+		t.Fatalf("after a failed append the file is %q", got)
 	}
 }
