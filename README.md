@@ -188,6 +188,17 @@ curl -X PUT -H 'Content-Range: bytes 8388608-16777215/20000000' --data-binary @p
 capability, so a byte range costs a `ReadAt` and not a whole-file read. A
 driver that does not implement `Opener` still works; it just reads the file.
 
+## Timestamps
+
+A driver with
+[`filesystem.TimesReader`](https://pkg.go.dev/github.com/go-filesystems/interface#TimesReader)
+(interface v0.6.0) supplies `getlastmodified` (its mtime, RFC 4918 section 15.7)
+and `creationdate` (its **birth** time; it used to be copied from the mtime).
+WebDAV can say "absent", so nothing is invented: a time the format does not
+keep is not listed by `allprop`/`propname`, a `PROPFIND` naming it gets it under
+`404`, and a `GET` sends no `Last-Modified`. A driver without the capability, or
+whose call fails, still reports the Handler's start time for both.
+
 ## Locking is real, not a stub
 
 The macOS WebDAV client will not write to a server that does not advertise
