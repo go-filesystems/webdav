@@ -25,13 +25,18 @@ const (
 // resourceInfo is everything one PROPFIND response row needs, gathered in a
 // single Stat so that rendering cannot go back to the driver and cannot fail.
 type resourceInfo struct {
-	path    string
-	name    string
-	isDir   bool
-	isLink  bool
-	size    uint64
+	path   string
+	name   string
+	isDir  bool
+	isLink bool
+	size   uint64
+	// modTime is the last-modified time; the zero time means the filesystem
+	// records none (see applyTimes).
 	modTime time.Time
-	etag    string
+	// created is the creation time, and hasCreated says there is one.
+	created    time.Time
+	hasCreated bool
+	etag       string
 }
 
 // info builds a resourceInfo for one path. The caller must hold [Handler.fsmu].
@@ -66,16 +71,46 @@ func (h *Handler) infoFromStat(p string, st filesystem.Stat) resourceInfo {
 		r.name = ""
 		r.isDir = true
 	}
-	// Timestamps. No driver in the fleet reports one yet, so every resource
-	// carries the Handler's start time. That is visibly wrong in a mounted
-	// volume's Date Modified column and it is reported here rather than
-	// hidden: the fix is a timestamp accessor on interface.Stat, not a guess
-	// in this module. The probe picks one up the day it exists.
+	// Timestamps. A driver with filesystem.TimesReader gives its own (see
+	// applyTimes); a Stat with the older TimeStat probe gives one mtime;
+	// otherwise every resource carries the Handler's start time, which is
+	// visibly wrong in a mounted volume's Date Modified column.
+	r.created = h.start
+	r.hasCreated = true
+	if tr, ok := h.fs.(filesystem.TimesReader); ok {
+		if ft, err := tr.Times(p); err == nil {
+			r.applyTimes(ft)
+			r.etag = etagFor(r)
+			return r
+		}
+	}
 	if t, ok := st.(TimeStat); ok {
 		r.modTime = time.Unix(t.ModTime(), 0).UTC()
+		r.created = r.modTime
 	}
 	r.etag = etagFor(r)
 	return r
+}
+
+// applyTimes takes the times a filesystem records.
+//
+// WebDAV can say "absent" where the other protocols cannot: a property a server
+// does not have is simply not listed, and a PROPFIND that names it gets it under
+// 404 (RFC 4918 section 9.1). So nothing is invented here:
+//
+//   - getlastmodified is the mtime; with none recorded, modTime stays the zero
+//     time, the property is not listed, and a GET sends no Last-Modified header
+//     (net/http.ServeContent omits it for a zero time).
+//   - creationdate is the BIRTH time, not the mtime it used to be copied from;
+//     with none recorded the property is not listed.
+//
+// WebDAV has no property for atime or ctime.
+func (r *resourceInfo) applyTimes(ft filesystem.FileTimes) {
+	r.modTime = time.Time{}
+	if t, ok := ft.Mtime.Get(); ok {
+		r.modTime = t
+	}
+	r.created, r.hasCreated = ft.Btime.Get()
 }
 
 // etagFor derives a strong entity tag from the metadata the driver reports.
@@ -90,9 +125,13 @@ func (h *Handler) infoFromStat(p string, st filesystem.Stat) resourceInfo {
 // cached copy can go stale. That is a consequence of the missing timestamp,
 // not of the hash, and it resolves itself the day [TimeStat] is satisfied.
 func etagFor(r resourceInfo) string {
+	var nano int64 // the zero time has no UnixNano: no mtime hashes as 0
+	if !r.modTime.IsZero() {
+		nano = r.modTime.UnixNano()
+	}
 	sum := sha256.Sum256([]byte(r.path + "\x00" +
 		strconv.FormatUint(r.size, 10) + "\x00" +
-		strconv.FormatInt(r.modTime.UnixNano(), 10)))
+		strconv.FormatInt(nano, 10)))
 	return `"` + hex.EncodeToString(sum[:12]) + `"`
 }
 

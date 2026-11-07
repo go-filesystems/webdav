@@ -41,11 +41,9 @@ const defaultMaxBody int64 = 1 << 30
 // [github.com/go-filesystems/interface.Stat] may implement to report a real
 // modification time.
 //
-// No driver in the fleet does today, so every resource this server exports
-// currently reports the Handler's start time as its getlastmodified. The
-// probe exists so that the day a driver starts reporting mtime, clients get
-// real times without a change here — and so that the gap is visible in the
-// API instead of buried in a comment. It is spelled exactly as
+// It is the older probe: a filesystem with [filesystem.TimesReader] (interface
+// v0.6.0) takes precedence over it, and a driver with neither reports the
+// Handler's start time as its getlastmodified. It is spelled exactly as
 // [github.com/go-filesystems/nfs.TimeStat] so a driver satisfies both servers
 // with one method.
 type TimeStat interface {

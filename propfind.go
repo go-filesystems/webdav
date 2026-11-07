@@ -237,8 +237,14 @@ func (h *Handler) respond(info resourceInfo, req propfindRequest) response {
 // propNames lists the properties this server has for a resource, which is
 // what propname answers and what allprop iterates.
 func (h *Handler) propNames(info resourceInfo) []string {
-	names := []string{"resourcetype", "displayname", "getlastmodified", "creationdate",
-		"getetag", "getcontenttype", "supportedlock", "lockdiscovery"}
+	names := []string{"resourcetype", "displayname"}
+	if !info.modTime.IsZero() {
+		names = append(names, "getlastmodified")
+	}
+	if info.hasCreated {
+		names = append(names, "creationdate")
+	}
+	names = append(names, "getetag", "getcontenttype", "supportedlock", "lockdiscovery")
 	if !info.isDir {
 		// getcontentlength is the one property RFC 4918 leaves undefined for
 		// a collection: there is no body to have a length.
@@ -305,11 +311,17 @@ func (h *Handler) propValue(info resourceInfo, n xml.Name) (property, bool) {
 	case "displayname":
 		return prop("displayname", textValue(info.name)), true
 	case "getlastmodified":
+		if info.modTime.IsZero() {
+			return property{}, false // the filesystem records none
+		}
 		return prop("getlastmodified", textValue(info.modTime.UTC().Format(http.TimeFormat))), true
 	case "creationdate":
+		if !info.hasCreated {
+			return property{}, false // no birth time: not invented from the mtime
+		}
 		// RFC 4918 requires ISO 8601 here and an HTTP-date above; they are
 		// genuinely different formats for the same instant.
-		return prop("creationdate", textValue(info.modTime.UTC().Format(time.RFC3339))), true
+		return prop("creationdate", textValue(info.created.UTC().Format(time.RFC3339))), true
 	case "getetag":
 		return prop("getetag", textValue(info.etag)), true
 	case "supportedlock":
