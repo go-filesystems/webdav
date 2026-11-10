@@ -1,5 +1,5 @@
-github.com/go-filesystems/fat32 v0.12.0 h1:1OWVKVk1wZQbRAPfNCS+z5M813Qfl6BQ7NjhGYlR4Og=
-github.com/go-filesystems/fat32 v0.12.0/go.mod h1:qt1vRLxSH0Fr1G+F9BGaotGsDyvuakMXVboyUnnp6N0=
+github.com/go-filesystems/fat32 v0.13.0 h1:7F6w9RHJeb3Zw+1QKmxprP8L8g1jayyiSjyBpelNNMc=
+github.com/go-filesystems/fat32 v0.13.0/go.mod h1:qt1vRLxSH0Fr1G+F9BGaotGsDyvuakMXVboyUnnp6N0=
 github.com/go-filesystems/hostcopy v0.1.0 h1:eNOy7iGrEe7dGZQ+UhnXJraZsnT+Ht3pP3OIWy69Wq0=
 github.com/go-filesystems/hostcopy v0.1.0/go.mod h1:5HPox1vd9HgHm4tzbem2w3a/QxmM0gyxhFQmKBKMrKI=
 github.com/go-filesystems/interface v0.6.0 h1:+7nA5FHgs/B03rZ9p81bkm0+6ew9fEntTFK8L5Uu6pk=

@@ -3,7 +3,7 @@ module github.com/go-filesystems/webdav/fat32demo
 go 1.27.1
 
 require (
-	github.com/go-filesystems/fat32 v0.12.0
+	github.com/go-filesystems/fat32 v0.13.0
 	github.com/go-filesystems/interface v0.6.0
 	github.com/go-filesystems/webdav v0.7.0
 )
