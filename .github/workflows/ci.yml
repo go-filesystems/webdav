@@ -368,6 +368,29 @@ jobs:
           test "$(curl -s --path-as-is http://127.0.0.1:18080/../HELLO.TXT)" = "hello from a real image"
           echo "::endgroup::"
 
+          echo "::group::the Depth-1 listing is OUR output, so assert it directly"
+          # This is what the davfs2 journal grep was reaching for, taken from
+          # the side that owns the answer. A client's log is prose about our
+          # work; this IS our work, and no runner image upgrade can reword it.
+          curl -s -i -X PROPFIND -H 'Depth: 1' http://127.0.0.1:18080/ | head -4
+          propfind=$(curl -s -i -X PROPFIND -H 'Depth: 1' http://127.0.0.1:18080/)
+          case "$propfind" in
+            *"207 Multi-Status"*) : ;;
+            *) echo "a Depth-1 PROPFIND on / must answer 207 Multi-Status"; exit 1 ;;
+          esac
+          # 207 alone is not the contract: the body must NAME the children, or
+          # an empty multistatus would pass — the shape of a measurement that
+          # read nothing being the best value in its column.
+          case "$propfind" in
+            *HELLO.TXT*) : ;;
+            *) echo "the Depth-1 listing of / does not name HELLO.TXT"; exit 1 ;;
+          esac
+          case "$propfind" in
+            *SUB*) : ;;
+            *) echo "the Depth-1 listing of / does not name the SUB collection"; exit 1 ;;
+          esac
+          echo "::endgroup::"
+
           echo "::group::cadaver — a real third-party WebDAV client"
           cadaver http://127.0.0.1:18080/ <<'CAD' | tee /tmp/live/cadaver.out
           ls
@@ -411,11 +434,29 @@ jobs:
           mnt_sum=$(sha256sum < /mnt/dav/SUB/BIG.BIN | cut -d' ' -f1) || davfs_ok=0
           echo "over the mount: $mnt_sum"
           test "$mnt_sum" = "$want" || { echo "digest over the mount FAILED"; davfs_ok=0; }
-          # The listing this server sent must have been understood, or the
-          # lookup above could not have resolved. Prove it from davfs2's own
-          # log rather than from the kernel's readdir.
-          sudo journalctl -t mount.davfs --no-pager 2>/dev/null | grep -q "added /HELLO.TXT" \
-            || { echo "davfs2 never parsed our Depth-1 listing"; davfs_ok=0; }
+          # ⛔ THE ASSERTION THAT USED TO BE HERE IS GONE, AND ITS OWN
+          # JUSTIFICATION IS WHY. It grepped davfs2's journal for
+          # `added /HELLO.TXT` and said: "the listing this server sent must
+          # have been understood, or the lookup above could not have
+          # resolved." That premise is FALSE. A lookup is itself a PROPFIND on
+          # the file; it does not need the parent's Depth-1 listing to have
+          # been parsed, so the grep never witnessed what it claimed to.
+          #
+          # Measured, not deduced (#30). `main` at 1cc8975 was green on
+          # 2026-11-11 and red on 2026-11-15 with nothing pushed between; the
+          # two runner images were `ubuntu-24.04` and `ubuntu-26.04`, the
+          # `ubuntu-latest` migration. And the red log REFUTES the first
+          # explanation I published for it: davfs2 on 26.04 still writes
+          # `added /...` — the line `added /SUB/BIG.BIN` is right there — it
+          # simply resolves `/HELLO.TXT` by `lookup /HELLO.TXT` instead of
+          # populating it from a listing of `/`. So the check was gating this
+          # repository on a third party's CACHING STRATEGY, which is further
+          # from a contract than its log wording was.
+          #
+          # The intent — "the Depth-1 listing we send is understood" — is kept
+          # and moved to where it belongs: asserted on OUR output below, and
+          # already asserted through a real client by cadaver's `ls` and
+          # `ls SUB` above, which cannot list what it has not parsed.
           if [ "$davfs_ok" -ne 1 ]; then
             echo "--- davfs2 / neon log ---"
             sudo journalctl -t mount.davfs --no-pager 2>/dev/null | tail -250 || true
