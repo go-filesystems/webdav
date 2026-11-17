@@ -10,7 +10,7 @@ go 1.27.4
 require (
 	github.com/go-filesystems/fat32 v0.13.0
 	github.com/go-filesystems/interface v0.6.0
-	github.com/go-filesystems/webdav v0.7.0
+	github.com/go-filesystems/webdav v0.8.0
 )
 
 require (
