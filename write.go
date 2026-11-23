@@ -187,7 +187,7 @@ func (h *Handler) serveDelete(w http.ResponseWriter, r *http.Request, name strin
 		http.Error(w, "webdav: cannot DELETE the root collection", http.StatusForbidden)
 		return
 	}
-	if err := h.checkLocks(r, name); err != nil {
+	if err := h.checkLocksTree(r, name); err != nil {
 		writeLockError(w, err)
 		return
 	}
@@ -373,11 +373,11 @@ func (h *Handler) serveMove(w http.ResponseWriter, r *http.Request, name string)
 	// Both ends are checked against the lock table: a MOVE removes the
 	// source and creates the destination, so a lock on either is a reason to
 	// refuse.
-	if err := h.checkLocks(r, name); err != nil {
+	if err := h.checkLocksTree(r, name); err != nil {
 		writeLockError(w, err)
 		return
 	}
-	if err := h.checkLocks(r, dst); err != nil {
+	if err := h.checkLocksTree(r, dst); err != nil {
 		writeLockError(w, err)
 		return
 	}
@@ -420,7 +420,7 @@ func (h *Handler) serveCopy(w http.ResponseWriter, r *http.Request, name string)
 		http.Error(w, "webdav: COPY accepts Depth 0 or infinity", http.StatusBadRequest)
 		return
 	}
-	if err := h.checkLocks(r, dst); err != nil {
+	if err := h.checkLocksTree(r, dst); err != nil {
 		writeLockError(w, err)
 		return
 	}

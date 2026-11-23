@@ -207,6 +207,11 @@ exclusive write locks with genuine enforcement — a `LOCK` creates a token, a
 conflicting request without that token is refused **423 Locked**, `If:` headers
 are parsed, locks are depth-aware, they expire on a timeout and are swept.
 A shared-lock request is refused rather than silently granted as exclusive.
+A lock on a member also protects it from `DELETE`, `MOVE` and an overwriting
+`COPY`/`MOVE` of an ancestor (RFC 4918 §7, §9.6.1): the token of every lock
+beneath the target must be submitted. The table is bounded: a lock's `<owner>`
+is capped at 4 KiB (413 above), the table retains at most 16 MiB, and a `LOCK`
+that is refused creates no file.
 
 It is a *server*-side lock table, in memory, scoped to the `Handler`: it
 coordinates the clients of one export and makes no claim about anything else
