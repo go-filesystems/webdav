@@ -76,7 +76,20 @@ const (
 	// maxLocks bounds the table so that a client cannot exhaust memory by
 	// locking a million distinct paths.
 	maxLocks = 1 << 16
+	// maxOwner caps the client's <owner> element after re-encoding. The
+	// element is free-form and is kept for the life of the lock.
+	maxOwner = 4 << 10
+	// maxLockBytes bounds the memory the table retains (owner, path and
+	// token of every lock), which maxLocks alone does not: 65536 locks of a
+	// 1 MiB owner would be 64 GiB.
+	maxLockBytes = 16 << 20
 )
+
+// errOwnerTooLarge reports an <owner> above maxOwner; it becomes 413.
+var errOwnerTooLarge = errors.New("webdav: lock owner too large")
+
+// size is the memory a lock holds on to.
+func (l *lockInfo) size() int { return len(l.owner) + len(l.path) + len(l.token) }
 
 // Lock errors, mapped to wire statuses by [writeLockError].
 var (
@@ -123,6 +136,8 @@ type lockSystem struct {
 	mu      sync.Mutex
 	byToken map[string]*lockInfo
 	byPath  map[string]*lockInfo
+	// bytes is the sum of size over byToken.
+	bytes int
 	// now is time.Now, indirected so expiry can be tested without sleeping.
 	now func() time.Time
 }
@@ -160,12 +175,18 @@ func newToken() (string, error) {
 // it calls this first.
 func (ls *lockSystem) sweep() {
 	now := ls.now()
-	for token, l := range ls.byToken {
+	for _, l := range ls.byToken {
 		if now.After(l.expiry) {
-			delete(ls.byToken, token)
-			delete(ls.byPath, l.path)
+			ls.drop(l)
 		}
 	}
+}
+
+// drop removes l from the table. The caller must hold [lockSystem.mu].
+func (ls *lockSystem) drop(l *lockInfo) {
+	delete(ls.byToken, l.token)
+	delete(ls.byPath, l.path)
+	ls.bytes -= l.size()
 }
 
 // conflict reports the live lock that blocks an operation on path, if any.
@@ -220,8 +241,12 @@ func (ls *lockSystem) create(path string, depth int, owner []byte, timeout time.
 		timeout: timeout,
 		expiry:  ls.now().Add(timeout),
 	}
+	if ls.bytes+l.size() > maxLockBytes {
+		return nil, ErrLockTableFull
+	}
 	ls.byToken[token] = l
 	ls.byPath[path] = l
+	ls.bytes += l.size()
 	return l, nil
 }
 
@@ -259,8 +284,7 @@ func (ls *lockSystem) unlock(path, token string) error {
 	if !ok || l.path != path {
 		return ErrNoSuchLock
 	}
-	delete(ls.byToken, token)
-	delete(ls.byPath, path)
+	ls.drop(l)
 	return nil
 }
 
@@ -273,8 +297,7 @@ func (ls *lockSystem) releaseTree(path string) {
 	defer ls.mu.Unlock()
 	for p, l := range ls.byPath {
 		if under(path, p) {
-			delete(ls.byPath, p)
-			delete(ls.byToken, l.token)
+			ls.drop(l)
 		}
 	}
 }
@@ -289,12 +312,40 @@ func (ls *lockSystem) confirm(path string, tokens []string) error {
 	if l == nil {
 		return nil
 	}
-	for _, t := range tokens {
-		if t == l.token {
-			return nil
-		}
+	if holds(l, tokens) {
+		return nil
 	}
 	return ErrLocked
+}
+
+// confirmTree is [lockSystem.confirm] for an operation that removes or
+// replaces path and everything beneath it (DELETE, the source of a MOVE, an
+// overwritten destination). RFC 4918 §7 and §9.6.1 make such an operation
+// subject to every lock on a member it affects, so each lock strictly under
+// path must have its token submitted too.
+func (ls *lockSystem) confirmTree(path string, tokens []string) error {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	ls.sweep()
+	if l := ls.conflict(path, depthZero); l != nil && !holds(l, tokens) {
+		return ErrLocked
+	}
+	for p, l := range ls.byPath {
+		if strictlyUnder(path, p) && !holds(l, tokens) {
+			return ErrLocked
+		}
+	}
+	return nil
+}
+
+// holds reports whether tokens contains l's token.
+func holds(l *lockInfo, tokens []string) bool {
+	for _, t := range tokens {
+		if t == l.token {
+			return true
+		}
+	}
+	return false
 }
 
 // find returns the live lock on exactly this path, for lockdiscovery.
@@ -405,6 +456,11 @@ func (h *Handler) checkLocks(r *http.Request, name string) error {
 	return h.locks.confirm(name, submittedTokens(r.Header.Get("If")))
 }
 
+// checkLocksTree is [Handler.checkLocks] for an operation on a whole subtree.
+func (h *Handler) checkLocksTree(r *http.Request, name string) error {
+	return h.locks.confirmTree(name, submittedTokens(r.Header.Get("If")))
+}
+
 // writeLockError maps a lock failure to its wire status.
 func writeLockError(w http.ResponseWriter, err error) {
 	switch {
@@ -499,6 +555,9 @@ func parseLock(r io.Reader) (lockRequest, error) {
 			if err != nil {
 				return lockRequest{}, err
 			}
+			if len(owner) > maxOwner {
+				return lockRequest{}, errOwnerTooLarge
+			}
 			req.owner = owner
 			continue
 		}
@@ -562,6 +621,10 @@ func (h *Handler) serveLock(w http.ResponseWriter, r *http.Request, name string)
 		return
 	}
 	req, err := parseLock(r.Body)
+	if errors.Is(err, errOwnerTooLarge) {
+		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+		return
+	}
 	if err != nil {
 		http.Error(w, "webdav: malformed LOCK body", StatusUnprocessable)
 		return
@@ -584,34 +647,42 @@ func (h *Handler) serveLock(w http.ResponseWriter, r *http.Request, name string)
 	// answers 201 (RFC 4918 §7.3). This is not a curiosity: it is how every
 	// client that locks before writing gets a lock for a file it is about to
 	// create, and refusing it is another way to end up mounted read-only.
+	//
+	// The lock is taken before the file is created, so a LOCK that the lock
+	// table refuses (a lock held on an ancestor, the table full) leaves no
+	// empty file behind inside a tree somebody else has locked.
+	l, err := h.locks.create(name, depth, req.owner, timeout)
+	if err != nil {
+		writeLockError(w, err)
+		return
+	}
 	created := false
 	h.fsmu.Lock()
 	if _, statErr := h.fs.Stat(name); statErr != nil {
 		if !notFound(statErr) {
 			h.fsmu.Unlock()
+			h.undoLock(l)
 			http.Error(w, "webdav: "+statErr.Error(), statusFor(statErr, http.StatusInternalServerError))
 			return
 		}
 		if writeErr := h.fs.WriteFile(name, nil, defaultFilePerm); writeErr != nil {
 			h.fsmu.Unlock()
+			h.undoLock(l)
 			http.Error(w, "webdav: "+writeErr.Error(), statusFor(writeErr, http.StatusInternalServerError))
 			return
 		}
 		created = true
 	}
 	h.fsmu.Unlock()
-
-	l, err := h.locks.create(name, depth, req.owner, timeout)
-	if err != nil {
-		writeLockError(w, err)
-		return
-	}
 	code := http.StatusOK
 	if created {
 		code = http.StatusCreated
 	}
 	h.writeLockResponse(w, l, code)
 }
+
+// undoLock releases a lock whose resource could not be prepared.
+func (h *Handler) undoLock(l *lockInfo) { _ = h.locks.unlock(l.path, l.token) }
 
 // writeLockResponse writes the prop/lockdiscovery body a LOCK answers with.
 func (h *Handler) writeLockResponse(w http.ResponseWriter, l *lockInfo, code int) {
