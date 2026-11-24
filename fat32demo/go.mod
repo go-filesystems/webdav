@@ -8,15 +8,15 @@ module github.com/go-filesystems/webdav/fat32demo
 go 1.27.4
 
 require (
-	github.com/go-filesystems/fat32 v0.13.0
+	github.com/go-filesystems/fat32 v0.13.1
 	github.com/go-filesystems/interface v0.6.0
-	github.com/go-filesystems/webdav v0.8.0
+	github.com/go-filesystems/webdav v0.9.0
 )
 
 require (
 	github.com/go-filesystems/hostcopy v0.1.0 // indirect
 	github.com/go-volumes/gpt v0.3.0 // indirect
-	github.com/go-volumes/safeio v0.0.0-20261011024942-5635ea21db3b // indirect
+	github.com/go-volumes/safeio v0.1.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 )
 
